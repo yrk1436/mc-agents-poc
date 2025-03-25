@@ -1,0 +1,24 @@
+{
+  "thread_id": "1",
+  "user_id": "roop",
+  "last_updated": "2025-03-24T19:16:56.810762",
+  "context": {
+    "brand_id": "TechCorp",
+    "survey_id": "S1",
+    "last_question": "What percentage of respondents are female?",
+    "last_response": {
+      "question_type": "analytical",
+      "results": [
+        {
+          "type": "analytical",
+          "agent_response": "```sql\nSELECT \n    (COUNT(*) * 100.0 / (SELECT COUNT(*) FROM all_responses WHERE brand_id = 'TechCorp' AND survey_id = 'S1')) AS female_percentage\nFROM \n    all_responses\nWHERE \n    brand_id = 'TechCorp' \n    AND survey_id = 'S1' \n    AND gender = 'Female';\n```\nThis query calculates the percentage of female respondents for the survey conducted by 'TechCorp' with the identifier 'S1'. It counts the number of responses where the gender is 'Female' and divides it by the total number of responses for the survey, multiplying by 100 to convert it to a percentage.",
+          "sql_results": [
+            {
+              "female_percentage": 44.73684210526316
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
