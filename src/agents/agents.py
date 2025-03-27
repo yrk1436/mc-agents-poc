@@ -7,7 +7,7 @@ from loguru import logger
 from langsmith import Client
 from langsmith.run_helpers import traceable
 from utils.db_manager import DatabaseManager
-from utils.chat_context import ChatContextManager
+from utils.context_manager import ContextManager
 import re
 
 class MarketResearchAgents:
@@ -17,9 +17,9 @@ class MarketResearchAgents:
             temperature=0.7
         )
         
-        # Initialize database and chat context managers
+        # Initialize database and context managers
         self.db_manager = DatabaseManager()
-        self.chat_context = ChatContextManager()
+        self.context_manager = ContextManager()
         
         self.router_agent = Agent(
             role='Query Router',
@@ -105,6 +105,13 @@ class MarketResearchAgents:
         # Get database schema info for better query generation
         schema_info = self.db_manager.get_schema_info()
         
+        # Extract brand and survey IDs from context
+        brand_id = context.get("brand_id")
+        survey_id = context.get("survey_id")
+        
+        if not brand_id or not survey_id:
+            raise ValueError("brand_id and survey_id are required in context for SQL queries")
+        
         return Task(
             description=f"""
             Generate a SQL query to answer this analytical question:
@@ -118,8 +125,8 @@ class MarketResearchAgents:
             - Metadata:
               * response_id: unique ID for each question response
               * user_id: ID of the survey respondent
-              * brand_id: brand being surveyed
-              * survey_id: specific survey name
+              * brand_id: brand being surveyed (MUST filter by: {brand_id})
+              * survey_id: specific survey name (MUST filter by: {survey_id})
               * timestamp: when the response was recorded
             
             - Question Information:
@@ -138,9 +145,15 @@ class MarketResearchAgents:
               * income_bracket: respondent's income bracket
               * education: respondent's education level
             
+            IMPORTANT FILTERING REQUIREMENTS:
+            1. You MUST include these filters in your WHERE clause:
+               brand_id = '{brand_id}' AND survey_id = '{survey_id}'
+            2. This ensures we only analyze data for the correct brand and survey
+            
             Remember:
             - Numeric values (age, answer for ratings) are stored as strings and need CAST
             - Multiple choice options are stored as pipe-separated strings
+            - Always include brand_id and survey_id filters to ensure data accuracy
             """,
             expected_output="""Return your response in this exact format:
             ```sql
@@ -170,12 +183,12 @@ class MarketResearchAgents:
 
     def process_question(self, question: str, context: dict, thread_id: Optional[str] = None, user_id: Optional[str] = None) -> dict:
         """Process a question and maintain chat context if thread_id is provided."""
-        # If thread_id is provided, get or initialize context
+        # If thread_id and user_id are provided, get or initialize context
         if thread_id and user_id:
-            saved_context = self.chat_context.get_context(thread_id)
+            saved_context = self.context_manager.get_context(user_id, thread_id)
             if saved_context:
                 # Merge saved context with current context
-                context.update(saved_context["context"])
+                context.update(saved_context.get("thread_context", {}))
         
         # Start with router task
         router_task = self.create_router_task(question, context)
@@ -249,33 +262,40 @@ class MarketResearchAgents:
                     "agent_response": str(sql_response),
                     "sql_results": sql_results
                 })
-            
-            # Then get insights
-            insight_task = self.create_insights_task(question, context)
-            crew = Crew(
-                agents=[self.insights_agent],
-                tasks=[insight_task],
-                verbose=True,
-                process=Process.sequential
+                
+                # Then generate insights
+                insight_task = self.create_insights_task(question, context)
+                crew = Crew(
+                    agents=[self.insights_agent],
+                    tasks=[insight_task],
+                    verbose=True,
+                    process=Process.sequential
+                )
+                insight_response = crew.kickoff()
+                results.append({
+                    "type": "insight",
+                    "analysis": str(insight_response)
+                })
+            else:
+                results.append({
+                    "type": "analytical",
+                    "agent_response": str(sql_response),
+                    "error": "No SQL query found in response"
+                })
+        
+        # Update context if thread_id and user_id are provided
+        if thread_id and user_id:
+            self.context_manager.update_interaction(
+                user_id=user_id,
+                thread_id=thread_id,
+                question=question,
+                response=str(results)
             )
-            insight_response = crew.kickoff()
-            results.append({
-                "type": "insight",
-                "analysis": str(insight_response)
-            })
-
-        response = {
+        
+        return {
             "question_type": str(question_type),
             "results": results
         }
-
-        # Save updated context if thread_id is provided
-        if thread_id and user_id:
-            context["last_question"] = question
-            context["last_response"] = response
-            self.chat_context.save_context(thread_id, user_id, context)
-
-        return response
 
     def execute_sql_analysis(self, query: str) -> List[Dict]:
         """Execute a SQL query and return results"""
