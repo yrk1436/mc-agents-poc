@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 from loguru import logger
 import uvicorn
 from pathlib import Path
@@ -21,25 +21,74 @@ app = FastAPI(title="Market Research Insights API")
 context_manager = ContextManager()
 agents = MarketResearchAgents()
 
+# Load available brands and surveys
+generator = SurveyDataGenerator()
+AVAILABLE_BRANDS = generator.brands
+AVAILABLE_SURVEYS = generator.surveys
+
 class QuestionRequest(BaseModel):
-    user_id: str
-    thread_id: str
-    brand_id: str
-    survey_id: str
     question: str
+    user_id: str  # Required for user context
+    thread_id: str  # Required for thread context
+    brand_id: str  # Required for data filtering
+    survey_id: str  # Required for data filtering
+    context: Optional[dict] = {}  # Additional context for this specific question
 
 class QuestionResponse(BaseModel):
     response: dict
     follow_up_suggestions: Optional[List[str]] = None
 
+class AvailableDataResponse(BaseModel):
+    brands: Dict[str, List[str]]
+
+@app.get("/available_data", response_model=AvailableDataResponse)
+async def get_available_data():
+    """Get list of available brands and their surveys"""
+    return {
+        "brands": {
+            brand: list(surveys.keys())
+            for brand, surveys in AVAILABLE_SURVEYS.items()
+        }
+    }
+
 @app.post("/process_question", response_model=QuestionResponse)
 async def process_question(request: QuestionRequest):
     try:
+        # Validate brand_id and survey_id
+        if request.brand_id not in AVAILABLE_BRANDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid brand_id. Available brands: {AVAILABLE_BRANDS}"
+            )
+        
+        if request.brand_id not in AVAILABLE_SURVEYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No surveys found for brand: {request.brand_id}"
+            )
+            
+        if request.survey_id not in AVAILABLE_SURVEYS[request.brand_id]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid survey_id for brand {request.brand_id}. Available surveys: {list(AVAILABLE_SURVEYS[request.brand_id].keys())}"
+            )
+        
         # Get context for this interaction
         context = context_manager.get_context(request.user_id, request.thread_id)
         
+        # Add brand and survey context
+        context.update({
+            "brand_id": request.brand_id,
+            "survey_id": request.survey_id
+        })
+        
         # Process question through agents
-        response = agents.process_question(request.question, context)
+        response = agents.process_question(
+            question=request.question,
+            context=context,
+            thread_id=request.thread_id,
+            user_id=request.user_id
+        )
         
         # Generate follow-up suggestions if needed
         follow_ups = []
